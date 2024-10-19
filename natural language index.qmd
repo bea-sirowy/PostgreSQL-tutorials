@@ -1,0 +1,566 @@
+---
+title: "Building a natural language index (a SQL demo)"
+author: "Beata Sirowy"
+format: html
+editor: visual
+---
+
+I build a natural language index on a document - first by hand and then using PostgreSQL inbuilt features.
+
+The document is created in Quarto accessed from RStudio connected to a locally hosted PostgreSQL database.
+
+## 1. Loading libraries
+
+```{r}
+
+library(tidyverse)         
+library(DBI)         
+library(RPostgres)         
+library(dbplyr)
+```
+
+## 2. Establishing a database connection (PostgreSQL)
+
+I use RPostgres package to connent to a locally hosted PostgreSQL database.
+
+```{r}
+
+con <- DBI::dbConnect(                           
+  RPostgres::Postgres(),                           
+  dbname = 'postgres',                          
+  host = 'localhost',                          
+  port = 5432,                           
+  user = 'postgres',                           
+  password = 'abcd'           )
+```
+
+## 3. Building a natural language index "manually"
+
+Taking advantage of some features of natural language we can make indexes quicker and more efficient.
+
+To optimize the performance of an index:
+
+-   we don't index '**stop word**s' (such as and, or, but, why - words that don't have meaning on their own);
+
+-   we ignore **capitalization** (upper case) / lower case distinction);
+
+-   we reduce variations of words with equivalent meanings down to a single "**stem word**".
+
+Stemming and stop words depend on which language the document is stored in - t**he rules for new languages can be installed** in PostgreSQL:
+
+```{sql connection=con}
+
+SELECT cfgname FROM pg_ts_config;
+
+```
+
+### Defining the key steps in a "manual" building of a natural language index
+
+-   creating a table of stop words used in the document;
+
+-   creating a table of stems (mapping the words in the text document to their stems, removing capitalization);
+
+-   creating the index table.
+
+We create a table to be used in the demo
+
+```{sql connection=con}
+
+CREATE TABLE docs (
+id SERIAL PRIMARY KEY,
+doc TEXT
+);
+
+```
+
+```{sql connection=con}
+
+INSERT INTO docs (doc) VALUES
+('This is SQL and Python and other fun teaching stuff'),
+('More people should learn SQL from Prof_Chuck'),
+('Prof_Chuck also teaches Python and also SQL');
+
+```
+
+```{sql connection=con}
+
+select * from docs;
+
+```
+
+### Breaking the document column into one row per word + primary key
+
+```{sql connection=con}
+
+SELECT id, new.keyword AS keyword
+FROM docs AS D, 
+unnest(string_to_array(D.doc, ' ')) new(keyword)
+ORDER BY id;
+```
+
+### Discarding duplicate rows
+
+```{sql connection=con}
+
+SELECT DISTINCT id, s.keyword AS keyword
+FROM docs AS D, unnest(string_to_array(D.doc, ' ')) s(keyword)
+ORDER BY id;
+
+
+```
+
+### Converting all words to lower case
+
+```{sql connection=con}
+
+SELECT DISTINCT id, s.keyword AS keyword
+FROM docs AS D, unnest(string_to_array(lower(D.doc), ' ')) s(keyword)
+ORDER BY id;
+
+```
+
+### Creating table with our GIS index
+
+```{sql connection=con}
+
+CREATE TABLE docs_gin (
+  keyword TEXT,
+  doc_id INTEGER REFERENCES docs(id) ON DELETE CASCADE
+  );
+```
+
+### 
+
+### Creating table with 'stop words'
+
+```{sql connection=con}
+
+CREATE TABLE stop_words (word TEXT unique);
+
+```
+
+```{sql connection=con}
+
+INSERT INTO stop_words (word) VALUES ('is'), ('this'), ('and');
+```
+
+```{sql connection=con}
+
+SELECT * FROM stop_words;
+
+```
+
+### Eliminating the 'stop words' from the query
+
+```{sql connection=con}
+
+SELECT DISTINCT id, s.keyword AS keyword
+FROM docs AS D, unnest(string_to_array(lower(D.doc), ' ')) s(keyword)
+WHERE s.keyword NOT IN (SELECT word FROM stop_words)
+ORDER BY id;
+```
+
+### Inserting the stop-word free list into the GIN table
+
+```{sql connection=con}
+
+INSERT INTO docs_gin (doc_id, keyword)
+SELECT DISTINCT id, s.keyword AS keyword
+FROM docs AS D, unnest(string_to_array(lower(D.doc), ' ')) s(keyword)
+WHERE s.keyword NOT IN (SELECT word FROM stop_words)
+ORDER BY id;
+```
+
+```{sql connection=con}
+
+
+SELECT * FROM docs_gin;
+
+```
+
+### Queries
+
+ 
+
+One word query
+
+```{sql connection=con}
+
+SELECT DISTINCT doc FROM docs AS D
+JOIN docs_gin AS G ON D.id = G.doc_id
+WHERE G.keyword = lower('SQL');
+
+```
+
+ 
+
+A multi word query
+
+```{sql connection=con}
+
+SELECT DISTINCT doc FROM docs AS D
+JOIN docs_gin AS G ON D.id = G.doc_id
+WHERE G.keyword =
+  ANY(string_to_array(lower('Meet fun people'), ' '));
+
+```
+
+ 
+
+A stop-word query - does not return any results
+
+```{sql connection=con}
+
+SELECT DISTINCT doc FROM docs AS D
+JOIN docs_gin AS G ON D.id = G.doc_id
+WHERE G.keyword = lower('and');
+
+```
+
+### Creating a table with stems of words
+
+```{sql connection=con}
+
+CREATE TABLE docs_stem (word TEXT, stem TEXT);
+
+```
+
+```{sql connection=con}
+
+INSERT INTO docs_stem (word, stem) VALUES
+('teaching', 'teach'), ('teaches', 'teach');
+
+```
+
+ 
+
+```{sql connection=con}
+
+SELECT * from docs_stem;
+
+```
+
+Moving the initial word extraction into a sub-query
+
+```{sql connection=con}
+
+SELECT id, keyword FROM (
+SELECT DISTINCT id, s.keyword AS keyword
+FROM docs AS D, unnest(string_to_array(lower(D.doc), ' ')) s(keyword)
+) AS X;
+
+```
+
+ 
+
+Adding the stems as third column (may or may not exist)
+
+```{sql connection=con}
+
+SELECT id, keyword, stem FROM (
+SELECT DISTINCT id, s.keyword AS keyword
+FROM docs AS D, unnest(string_to_array(lower(D.doc), ' ')) s(keyword)
+) AS K
+LEFT JOIN docs_stem AS S ON K.keyword = S.word
+ORDER BY keyword DESC;
+
+
+```
+
+ 
+
+### Defining the course of action: if the stem is there, use it
+
+```{sql connection=con}
+
+SELECT id,
+CASE WHEN stem IS NOT NULL THEN stem 
+ELSE keyword 
+END AS awesome,keyword, stem
+FROM (
+SELECT DISTINCT id, lower(s.keyword) AS keyword
+FROM docs AS D, unnest(string_to_array(D.doc, ' ')) s(keyword)
+) AS K
+LEFT JOIN docs_stem AS S ON K.keyword = S.word
+ORDER BY keyword DESC;
+
+```
+
+ 
+
+Null Coalescing - returns the first non-null in a list, the command will be further integrated in our query
+
+```{sql connection=con}
+
+SELECT COALESCE(NULL, NULL, 'Prof_Chuck');
+
+```
+
+```{sql connection=con}
+
+SELECT COALESCE('Prof_Chuck', NULL, 'SQL');
+
+```
+
+### 
+
+### Defining the course of action:: if the stem is there, use it instead of the keyword
+
+```{sql connection=con}
+
+SELECT id, COALESCE(stem, keyword) AS keyword
+FROM (
+SELECT DISTINCT id, s.keyword AS keyword
+FROM docs AS D, unnest(string_to_array(lower(D.doc), ' ')) s(keyword)
+) AS K
+LEFT JOIN docs_stem AS S ON K.keyword = S.word
+ORDER BY keyword DESC;
+```
+
+### Inserting the stems in the index table docs_gin
+
+```{sql connection=con}
+
+DELETE FROM docs_gin;
+```
+
+```{sql connection=con}
+
+INSERT INTO docs_gin (doc_id, keyword)
+SELECT id, COALESCE(stem, keyword)
+FROM (
+  SELECT DISTINCT id, s.keyword AS keyword
+  FROM docs AS D, unnest(string_to_array(lower(D.doc), ' ')) s(keyword)
+) AS K
+LEFT JOIN docs_stem AS S ON K.keyword = S.word;
+
+```
+
+```{sql connection=con}
+
+SELECT * FROM docs_gin;
+```
+
+ 
+
+**Lets do stop words and stems**
+
+```{sql connection=con}
+
+DELETE FROM docs_gin;
+```
+
+```{sql connection=con}
+
+INSERT INTO docs_gin (doc_id, keyword)
+SELECT id, COALESCE(stem, keyword)
+FROM (
+  SELECT DISTINCT id, s.keyword AS keyword
+  FROM docs AS D, unnest(string_to_array(lower(D.doc), ' ')) s(keyword)
+  WHERE s.keyword NOT IN (SELECT word FROM stop_words)
+) AS K
+LEFT JOIN docs_stem AS S ON K.keyword = S.word;
+
+```
+
+```{sql connection=con}
+
+SELECT * FROM docs_gin
+LIMIT 20;
+
+```
+
+### Examples of queries
+
+```{sql connection=con}
+
+SELECT COALESCE((SELECT stem FROM docs_stem WHERE word=lower('SQL')), lower('SQL'));
+```
+
+Handling the stems in queries. Use the keyword if there is no stem
+
+```{sql connection=con}
+
+SELECT DISTINCT id, doc FROM docs AS D
+JOIN docs_gin AS G ON D.id = G.doc_id
+WHERE G.keyword = COALESCE((SELECT stem FROM docs_stem WHERE word=lower('SQL')), lower('SQL'));
+
+```
+
+ 
+
+Prefer the stem over the actual keyword. The technical term for converting search term to their stems is called "**conflation**"
+
+```{sql connection=con}
+
+SELECT COALESCE((SELECT stem FROM docs_stem WHERE word=lower('teaching')), lower('teaching'));
+
+```
+
+ 
+
+```{sql connection=con}
+
+SELECT DISTINCT id, doc FROM docs AS D
+JOIN docs_gin AS G ON D.id = G.doc_id
+WHERE G.keyword = COALESCE((SELECT stem FROM docs_stem WHERE word=lower('teaching')), lower('teaching'));
+```
+
+## 4. Building a natural language index with PostgreSQL built-in features (much easier and more efficient)
+
+-   **ts_vector** is an special "array" of stemmed words, passed throug a stop-word filter + positions within the document. We need to specify **the language of the document**.
+
+```{sql connection=con}
+
+SELECT to_tsvector('english', 'This is SQL and Python and other fun teaching stuff');
+
+```
+
+```{sql connection=con}
+
+SELECT to_tsvector('english', 'More people should learn SQL from Prof_Chuck');
+```
+
+```{sql connection=con}
+
+SELECT to_tsvector('english', 'Prof_Chuck also teaches Python and also SQL');
+
+```
+
+ 
+
+-   **ts_query** is an "array" of lower case, stemmed words with stop words removed plus logical operators & = and, ! = not, \| = or. We need to specify **the language of the document.**
+
+```{sql connection=con}
+
+SELECT to_tsquery('english', 'teaching');
+```
+
+```{sql connection=con}
+
+SELECT to_tsquery('english', 'teaches');
+
+```
+
+```{sql connection=con}
+
+SELECT to_tsquery('english', 'and');
+
+```
+
+```{sql connection=con}
+
+SELECT to_tsquery('german', 'SQL');
+
+```
+
+```{sql connection=con}
+
+SELECT to_tsquery('english', 'Teach | teaches | teaching | and | the | if');
+
+```
+
+-   **plainto_tsquery** just pulls out the keywords - plain text
+
+```{sql connection=con}
+
+SELECT plainto_tsquery('english', 'SQL Python');
+
+```
+
+```{sql connection=con}
+
+SELECT plainto_tsquery('english', 'Teach teaches teaching and the if');
+
+```
+
+ 
+
+-   **phraseto_tsquery**: words that come in order (a phrase)
+
+```{sql connection=con}
+
+SELECT phraseto_tsquery('english', 'SQL Python');
+
+```
+
+ 
+
+-   **websearch_to_tsquery** is in PostgreSQL \>= 11 and a bit like Google advanced websearch
+
+```{sql connection=con}
+
+SELECT websearch_to_tsquery('english', 'SQL -not Python');
+```
+
+```{sql connection=con}
+
+SELECT to_tsquery('english', 'teaching') @@
+  to_tsvector('english', 'Prof_Chuck also teaches Python and also SQL');
+
+```
+
+### 
+
+### Creating an english language inverted index using a tsvector index.
+
+```{sql connection=con}
+
+DROP TABLE docs cascade;
+
+```
+
+```{sql connection=con}
+
+CREATE TABLE docs (id SERIAL, doc TEXT, PRIMARY KEY(id));
+
+```
+
+```{sql connection=con}
+
+CREATE INDEX gin1 ON docs USING gin(to_tsvector('english', doc));
+
+```
+
+```{sql connection=con}
+
+INSERT INTO docs (doc) VALUES
+('This is SQL and Python and other fun teaching stuff'),
+('More people should learn SQL from Prof_Chuck'),
+('Prof_Chuck also teaches Python and also SQL');
+```
+
+Inserting filler rows
+
+```{sql connection=con}
+
+INSERT INTO docs (doc) SELECT 'Neon ' || generate_series(10000,20000);
+
+```
+
+```{sql connection=con}
+
+SELECT id, doc FROM docs WHERE
+    to_tsquery('english', 'learn') @@ to_tsvector('english', doc);
+
+```
+
+```{sql connection=con}
+
+EXPLAIN SELECT id, doc FROM docs WHERE
+    to_tsquery('english', 'learn') @@ to_tsvector('english', doc);
+
+```
+
+ 
+
+**Checking the operation types for the various indexes in PostgreSQL**
+
+```{sql connection=con}
+
+SELECT am.amname AS index_method, opc.opcname AS opclass_name
+    FROM pg_am am, pg_opclass opc
+    WHERE opc.opcmethod = am.oid
+    ORDER BY index_method, opclass_name;
+
+```

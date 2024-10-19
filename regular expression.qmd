@@ -1,0 +1,418 @@
+---
+title: "Refular Expressions (a SQL demo)"
+author: "Beata Sirowy"
+format: html
+editor: visual
+---
+
+The document is created in Quarto accessed from RStudio connected to a locally hosted PostgreSQL database.
+
+## 1. Loading libraries
+
+```{r}
+
+library(tidyverse)        
+library(DBI)        
+library(RPostgres)        
+library(dbplyr)
+```
+
+## 2. Establishing a database connection (PostgreSQL)
+
+I use RPostgres package to connent to a locally hosted PostgreSQL database.
+
+```{r}
+con <- DBI::dbConnect(                        
+  RPostgres::Postgres(),                        
+  dbname = 'postgres',                        
+  host = 'localhost',                        
+  port = 5432,                        
+  user = 'postgres',                        
+  password = 'abcd'        )
+```
+
+## 
+
+## 3. Regular Expressions: an overview
+
+-   a text-based programming language;
+
+-   used for text matching and parsing: specifying patterns of characters, numbers, and symbols, which can be used to identify, replace or split data;
+
+-   can be used in many programming languages;
+
+-   marker characters are keywords - very compact (developed in 1960s/70s)
+
+    ```         
+    Regular Expression Quick Guide
+
+    ^        Matches the beginning of a line
+
+    $        Matches the end of the line
+
+    .        Matches any character
+
+    \s       Matches whitespace
+
+    \S       Matches any non-whitespace character
+
+    *        Repeats a character zero or more times
+
+    *?       Repeats a character zero or more times 
+             (non-greedy)
+
+    +        Repeats a character one or more times
+
+    +?       Repeats a character one or more times 
+             (non-greedy)
+
+    [aeiou]  Matches a single character in the listed set
+
+    [^XYZ]   Matches a single character not in the listed set
+
+    [a-z0-9] The set of characters can include a range
+
+    (        Indicates where string extraction is to start
+
+    )        Indicates where string extraction is to end
+
+
+     WHERE CLAUSE OPERATORS
+
+     ~¨  matches 
+
+     ~*  matches case sensitive  
+
+     !~  does not match
+
+     !~* does not match case insensitive
+    ```
+
+\~ is different than LIKE. \~'DOG' is equivalent to LIKE '%DOG%'
+
+We will use the previously created textfun table to test some expressions.
+
+ 
+
+**Finding strings including any of the letters in in the range a - c**
+
+```{sql connection=con}
+
+SELECT content FROM textfun
+WHERE content ~'[a-c]'
+LIMIT 5;
+
+```
+
+\
+
+**Finding strings including the word 'one'**
+
+```{sql connection=con}
+
+SELECT content FROM textfun
+WHERE content ~'one'
+LIMIT 5;
+
+```
+
+ 
+
+**Finding strings not including the word 'one'**
+
+```{sql connection=con}
+
+SELECT content FROM textfun
+WHERE content !~'one'
+LIMIT 5;
+
+```
+
+ 
+
+**Finding strings ending with '124'**
+
+```{sql connection=con}
+
+SELECT content FROM textfun
+WHERE content ~'124$'
+LIMIT 5;
+
+```
+
+ 
+
+**Finding strings beginning with 'h'**
+
+```{sql connection=con}
+
+SELECT content FROM textfun
+WHERE content ~ '^(h)'
+LIMIT 5;
+
+
+```
+
+ 
+
+**Finding strings including a digit from range 2-3 immediately followed by a digit from the range 8-9.**
+
+```{sql connection=con}
+
+SELECT content FROM textfun
+WHERE content ~ '[2-3][8-9]'
+LIMIT 10;
+
+```
+
+ 
+
+**Finding strings including a digit from the range 2-3, separated by any number of characters, followed by a digit from the range 8-9.**
+
+```{sql connection=con}
+
+SELECT content FROM textfun
+WHERE content ~ '[2-3].*[8-9]'
+LIMIT 10;
+
+
+```
+
+  
+
+**The following table will be used in further examples**
+
+```{sql connection=con}
+
+CREATE TABLE em (
+id serial, 
+primary key(id), 
+email text UNIQUE);
+
+```
+
+```{sql connection=con}
+
+INSERT INTO em (email) VALUES ('sev@umich.edu');
+```
+
+```{sql connection=con}
+
+INSERT INTO em (email) VALUES ('coleen@umich.edu');
+```
+
+```{sql connection=con}
+
+INSERT INTO em (email) VALUES ('sally@uiuc.edu');
+
+```
+
+```{sql connection=con}
+
+INSERT INTO em (email) VALUES ('ted79@umuc.edu');
+
+```
+
+```         
+```
+
+```{sql connection=con}
+
+INSERT INTO em (email) VALUES ('glenn1@apple.com');
+
+```
+
+```{sql connection=con}
+
+INSERT INTO em (email) VALUES ('nbody@apple.com');
+
+```
+
+```{sql connection=con}
+
+select * from em;
+
+```
+
+### Selecting strings matching specific criteria
+
+```{sql connection=con}
+
+SELECT email 
+FROM em 
+WHERE email ~ 'umich';
+
+```
+
+```{sql connection=con}
+
+SELECT email 
+FROM em 
+WHERE email ~ '^c';
+
+```
+
+```{sql connection=con}
+
+SELECT email 
+FROM em 
+WHERE email ~ 'edu$';
+
+```
+
+```{sql connection=con}
+
+SELECT email 
+FROM em 
+WHERE email ~ '^[gnt]';
+
+```
+
+```{sql connection=con}
+
+SELECT email 
+FROM em 
+WHERE email ~ '[0-9]';
+
+```
+
+```{sql connection=con}
+
+SELECT email 
+FROM em 
+WHERE email ~ '[0-9][0-9]';
+
+```
+
+## 4. Single and multiple matches
+
+-   SUBSTRING() gets the first match in the text column
+
+-   REGEXP\_ MATCHES() gets an array of matches
+
+### SUBSTRING() - the first match in a column
+
+ 
+
+**Pulling out digits from email column** (one or more contiguous digits). The last statement limits the result list - columns with N/A aren't displayed.
+
+```{sql connection=con}
+
+SELECT substring(email FROM '[0-9]+') 
+FROM em
+WHERE email ~ '[0-9]';
+
+```
+
+ 
+
+**Pulling out domain names from email addresses.**
+
+```{sql connection=con}
+
+
+SELECT substring(email FROM '.+@(.*)$')
+FROM em;
+
+```
+
+ 
+
+**Pulling out distinct domain names from email addresses,** including \@ character.
+
+```{sql connection=con}
+
+SELECT DISTINCT substring(email FROM '.+(@.*)$') 
+FROM em;
+
+```
+
+ 
+
+**Pulling out distinct domain names from email addresses, counting the occurrences of each.**
+
+```{sql connection=con}
+
+SELECT substring(email FROM '.+@(.*)$'), 
+    count(substring(email FROM '.+@(.*)$')) 
+FROM em 
+GROUP BY substring(email FROM '.+@(.*)$');
+
+```
+
+\
+**Finding all records where email address includes domain name 'umich.edu'-**
+
+```{sql connection=con}
+
+SELECT * FROM em 
+WHERE substring(email 
+FROM '.+@(.*)$') = 'umich.edu';
+
+```
+
+ 
+
+### REGEXP_MATCHES () - an array of matches within a column
+
+```{sql connection=con}
+
+CREATE TABLE tw (id serial, primary key(id), tweet text);
+
+```
+
+```{sql connection=con}
+
+INSERT INTO tw (tweet) 
+VALUES ('This is #SQL and #FUN stuff');
+
+```
+
+```{sql connection=con}
+
+INSERT INTO tw (tweet) 
+VALUES ('More people should learn #SQL FROM #PROF_ABC')
+
+```
+
+```{sql connection=con}
+
+INSERT INTO tw (tweet) 
+VALUES ('#PROF_ABC also teaches #PYTHON and #R');
+```
+
+```{sql connection=con}
+
+select * from tw;
+
+```
+
+```{sql connection=con}
+
+SELECT id, tweet FROM tw WHERE tweet ~ '#SQL';
+
+```
+
+```{sql connection=con}
+
+SELECT regexp_matches(tweet,'#([A-Za-z0-9_]+)', 'g') FROM tw;
+
+```
+
+```{sql connection=con}
+
+
+SELECT DISTINCT regexp_matches(tweet,'#([A-Za-z0-9_]+)', 'g') FROM tw;
+
+```
+
+```{sql connection=con}
+
+SELECT id, regexp_matches(tweet,'#([A-Za-z0-9_]+)', 'g') FROM tw;
+
+```
+
+```{sql connection=con}
+
+select substring(email FROM '[0-9]+') FROM em WHERE email ~'[0-9]';
+```

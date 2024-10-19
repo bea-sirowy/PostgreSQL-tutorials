@@ -1,0 +1,420 @@
+---
+title: "Text functions and query performance (a SQL demo)"
+author: "Beata Sirowy"
+format: html
+editor: visual
+---
+
+The document showcases various text functions, evaluated on a randomly generated dataset, along with an analysis of query performance.
+
+The document is created in Quarto accessed from RStudio connected to a locally hosted PostgreSQL database.
+
+## 1. Loading libraries
+
+```{r}
+
+library(tidyverse)       
+library(DBI)       
+library(RPostgres)       
+library(dbplyr)
+```
+
+## 2. Establishing a database connection (PostgreSQL)
+
+I use RPostgres package to connent to a locally hosted PostgreSQL database.
+
+```{r}
+
+con <- DBI::dbConnect(                     
+  RPostgres::Postgres(),                     
+  dbname = 'postgres',                     
+  host = 'localhost',                     
+  port = 5432,                     
+  user = 'postgres',                     
+  password = 'abcd'     
+  )
+```
+
+## 3. An overview - text functions
+
+### a. Pattern matching: WHERE clause operators:
+
+-   LIKE / ILIKE / NOT LIKE / NOT ILIKE - we can use wildcards with these expressions. ILIKE operator is case -insensitive. A query including ILIKE takes more time to execute than a query with LIKE operator.
+
+-   SIMILAR TO / NOT SIMILAR TO (works like a 'regular expression' - presented further in this document)
+
+-   = . \> , \<=, \>= , BETWEEN IN
+
+### b. String functions
+
+-   'string_a\_' \|\| 'string_b\_' Result: string_a_string_b\_
+
+-   \*string_a\_' \|\| 45 Result: string_a_45
+
+-   char_length('tom') - number of characters in a string
+
+-   lower('TOM') , upper('tom') - converts a string to a lower/upper case
+
+-   overlay('Thxxxxs' placing 'oma' from 3 for 4) Result: Thomas - replaces a substring
+
+-   pg_relation_size('table_name'). pg_indexes_size('table_name') - provides size (bits)
+
+-   etc.
+
+## 3. Generating random data
+
+The following PostgreSQL functions are useful in data generation:
+
+-   REPEAT () - generating long strings (horizontal)
+
+-   GENERATE_SERIES() - generating multiple rows (vertical), like Python's or R's range
+
+-   RANDOM() makes rows unique
+
+    Floating point 0 \<= RANDOM() \<= 1.0
+
+```{sql connection=con}
+
+SELECT RANDOM(), RANDOM()*100, TRUNC(RANDOM()*100);
+
+```
+
+```{sql connection=con}
+
+SELECT REPEAT('Lemon', 5);
+
+```
+
+```{sql connection=con}
+
+SELECT GENERATE_SERIES(2, 5);
+
+```
+
+Combining these function, we can quickly generate a data frame with lots of random data (e.g. for training purposes)
+
+```{sql connection=con}
+
+SELECT 'https://wikipedia.org' || 
+TRUNC(RANDOM()*10000) || 
+REPEAT('Pink', 2) || 
+GENERATE_SERIES(1,6);
+```
+
+## 4. Creating a random dataset
+
+### a. creating a table
+
+```{sql connection=con}
+
+CREATE TABLE textfun (
+content TEXT
+);
+
+```
+
+```{sql connection=con}
+
+CREATE INDEX textfun_b ON textfun (content);
+
+```
+
+The default type of index is b-tree.
+
+In the following I use pg_relation_size('table_name') and pg_indexes_size('table_name') functions - their output is size (bits).
+
+```{sql connection=con}
+
+SELECT pg_relation_size ('textfun'), pg_indexes_size ('textfun');
+
+```
+
+Index - trades space for speed.
+
+### b. Inserting randomly generated data into the table
+
+We first specify the way the data is generated:
+
+``` sql
+The following statement randomly generates one of two strings: 
+
+CASE WHEN (RANDOM() < 0.5) 
+THEN 'https://wikipedia.org/one/'
+ELSE 'https://wikipedia.org/two/'
+END
+
+This can be combined with: 
+
+GENERATE_SERIES(10000, 20000)
+```
+
+```{sql connection=con}
+
+INSERT INTO textfun (content)
+SELECT(
+CASE WHEN (RANDOM() < 0.5) 
+THEN 'https://wikipedia.org/one/'
+ELSE 'https://wikipedia.org/two/'
+END
+) ||
+GENERATE_SERIES(10000, 20000);
+```
+
+This creates a table with 10000 rows, here is a preview:
+
+![](images/clipboard-2018739308.png)
+
+```{sql connection=con}
+
+SELECT pg_relation_size ('textfun'), pg_indexes_size ('textfun');
+
+```
+
+The index is growing faster than the actual data content - as the table includes only one column (with TEXT variable type that takes a lot of space) and the column content is completely replicated in the index.
+
+With 'real' tables including multiple columns, the size of the table would exceed the size of the index.
+
+### c. Using text functions on the generated table
+
+```{sql connection=con}
+
+SELECT content 
+FROM textfun
+WHERE content LIKE '%1505%';
+
+
+```
+
+UPPER() and LOWER() function return the content written in the upper / lower case
+
+```{sql connection=con}
+
+SELECT UPPER(content) 
+FROM textfun 
+WHERE content LIKE '%1505%';
+
+```
+
+RIGHT() and LEFT() functions return a specified number of characters on the right/ left end of the string.
+
+```{sql connection=con}
+
+SELECT RIGHT(content, 4) 
+FROM textfun 
+WHERE content LIKE '%1505%';
+```
+
+```{sql connection=con}
+
+SELECT LEFT(content, 4) 
+FROM textfun 
+WHERE content LIKE '%1505%';
+
+```
+
+The following query selects a substring from strings in the column \*content\* . In this case, the substring is 7 characters long and starts from a second string.
+
+```{sql connection=con}
+
+SELECT substr(content, 2, 7) 
+FROM textfun
+LIMIT 5;
+```
+
+The following query splits content with a specified divider and returns the content of n-th division. In this case, the divider is "/" and we want to get the string in rhe fourth part - the word one or two.
+
+```{sql connection=con}
+
+SELECT content, 
+split_part(content, '/', 4) FROM textfun;
+```
+
+The following query - a "character translation map" - replaces the exact characters given in the first string with the characters given in the second string,
+
+```{sql connection=con}
+
+SELECT translate (content, 'tpw:', 'TPx!'), content
+FROM textfun
+LIMIT 5
+
+
+```
+
+## 4. B-tree index performance
+
+We use EXPLAIN ANALYSE command to check the performance / compare performance of different queries.
+
+```{sql connection=con}
+
+EXPLAIN ANALYSE 
+SELECT content 
+FROM textfun 
+WHERE content LIKE '%153%';
+
+
+```
+
+```{sql connection=con}
+
+EXPLAIN ANALYSE
+SELECT content 
+FROM textfun
+WHERE content LIKE '_wo';
+
+
+```
+
+```{sql connection=con}
+
+EXPLAIN ANALYSE 
+SELECT content 
+FROM textfun 
+WHERE content ILIKE '%153%';
+
+```
+
+```{sql connection=con}
+EXPLAIN ANALYSE
+SELECT content 
+FROM textfun 
+WHERE content LIKE 'one';
+```
+
+```{sql connection=con}
+
+EXPLAIN ANALYZE
+SELECT content FROM textfun
+WHERE content IN ('one', 'two');
+
+```
+
+-   As we can see, the last two scans are "Index only scans" , where index condition is automatically specified. The other ones are sequential ones (i.e. all records needs to be checked), this makes them far less efficient. time-wise
+
+-   The query including ILIKE operator took the most time to execute and the difference in performance is rather substantial - even with our very simple data set.
+
+-   B-tree indexes perform best with sorting, exact matches and prefix look up.
+
+-   A way to speed up a sequential scan is to limit the result set with LIMIT clause - when relevant. Se below:
+
+    ```{sql connection=con}
+
+    EXPLAIN ANALYSE 
+    SELECT content 
+    FROM textfun 
+    WHERE content ILIKE '%153%'
+    LIMIT 10;
+
+    ```
+
+```         
+```
+
+## 5. Hashing functions in indexes
+
+Using PostgreSQL in-built hashing functions can improve the performance of indexing. MD5 hashing function is usually sufficient in situations where we check uniqueness (it is simpler than SHA256).
+
+In the following we create a MD5 index on content column of textfun table.
+
+```{sql connection=con}
+
+CREATE UNIQUE INDEX textfun_b_MD5 ON textfun (md5(content));
+
+```
+
+```{sql connection=con}
+
+EXPLAIN ANALYZE
+SELECT * FROM textfun
+WHERE content = 'one%';
+
+```
+
+```{sql connection=con}
+
+EXPLAIN ANALYZE
+SELECT * FROM textfun
+WHERE md5(content) = md5('one');
+
+```
+
+We can see that in our simple database the execution actually took longer to perform the search with MD5 hash function than with ordinary index scan using default b-tree index- but in more complex databases it is often a way to improve the performance. The overall time of the query (planning + execution) was shorter with MD5 index search.
+
+Hashing index can be also created with the following command (vithout specifying 'USING HASH' the default method is b-tree):
+
+``` sql
+CREATE INDEX textfun_hash 
+ON textfun USING HASH (co);
+```
+
+### Hashing with a separate column
+
+Another option would be to add a column including just the outputs of a MD5 hashing function on the content column.
+
+```{sql connection=con}
+
+ALTER TABLE textfun 
+ADD MD5_content uuid UNIQUE;
+```
+
+```{sql connection=con}
+
+UPDATE textfun 
+SET MD5_content = md5(content)::uuid;  
+```
+
+```{sql connection=con}
+
+SELECT * FROM textfun LIMIT 5; 
+```
+
+![](images/clipboard-2271446633.png)
+
+We can now perform search on the column including hashed data (MD5_content)
+
+```{sql connection=con}
+
+EXPLAIN ANALYZE
+SELECT * FROM textfun
+WHERE MD5_content = md5('one')::uuid;
+
+```
+
+Summing up,
+
+-   No index: slowest look-up, but we save space;
+
+-   B-tree indexes - usually preferred, help with exact look-up, predix look-up, sorting, \>.\<, range, sorting;
+
+-   Hash indexes - smaller, help only on exact look-up (quicker than b-tree indexes).
+
+## 6. Pattern matching: regular expressions (REGEXP)
+
+Beyond the text functions already discussed, we can also use regular expression for pattern matching purposes.
+
+Regular expression: *a method of specifying patterns of characters, numbers, and symbols, which can be used to identify, replace or split data.*
+
+They can help with tasks like data cleaning, validation, and extraction, which can be difficult to accomplish with standard SQL functions.
+
+Not every database supports them (e.g. supported in PostgreSQL, MySQL, Oracle). Should be used with caution - may affect database performance.
+
+Three main types:
+
+-   REGEXP_LIKE: used to match the input string with the regular expression pattern
+
+    ![](images/clipboard-3842213338.png)
+
+    The query returns e-mail addresses that match the regular expression.
+
+-   XP_REPLACE: used to replace the string matching a regular expression pattern
+
+    ![](images/clipboard-369597270.png)
+
+    The query cleans up a string that should only contain numbers
+
+-   REGEXP_SUBSTR: used to extract a substring from a string that matches a regular expression pattern.
+
+    ![](images/clipboard-3048211489.png)
+
+    The query extracts URL from the text - the following expression matches URL: https?://\[\^ \]+
+
+    In this statement, ? - denotes repetition of the previous item zero or more times; + denotes repetition of the previous item zero or more times, \^ matches the start of a string, \[...\] specifies a character class.

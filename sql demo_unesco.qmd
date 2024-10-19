@@ -1,0 +1,349 @@
+---
+title: "A SQL demo: designing a relational database model: Unesco World Heritage Cultural Sites"
+author: "Beata Sirowy"
+format: html
+editor: visual
+---
+
+The task is to design a database model representing flat data across multiple linked tables using "third-normal form" (3NF), i.e. columns that have vertical duplication need to be placed in their own table and linked into the main table using a foreign key.
+
+ 
+
+***Third normal form** (**3NF**) is a database schema design approach for relational databases which uses normalizing principles to reduce the duplication of data, avoid data anomalies, ensure referential integrity, and simplify data management. It was defined in 1971 by Edgar F. Codd, an English computer scientist who invented the relational model for database management. (Wikipedia)*
+
+ 
+
+The document is created in Quarto accessed from RStudio connected to a locally hosted PostgreSQL database.
+
+## 1. Loading libraries
+
+```{r}
+library(tidyverse)      
+library(DBI)      
+library(RPostgres)      
+library(dbplyr)
+```
+
+## 2. Establishing a database connection (PostgreSQL)
+
+I use RPostgres package to connent to a locally hosted PostgreSQL database.
+
+```{r}
+
+con <- DBI::dbConnect(                  
+  RPostgres::Postgres(),                  
+  dbname = 'postgres',                  
+  host = 'localhost',                  
+  port = 5432,                  
+  user = 'postgres',                  
+  password = 'abcd'     
+)
+```
+
+## 3. Data
+
+This is a preview of the original csv table
+
+![](images/clipboard-1357610285.png)
+
+## 4. Database design
+
+The file includes following columns:
+
+name
+
+year
+
+longitude
+
+latitude
+
+area_hectares
+
+**category**
+
+**states**
+
+**region**
+
+**ISO**
+
+The column names written in bold include a lot of vertical replication, which needs to be eliminated - the data will be moved to separate tables.
+
+The data model will include 5 linked tables:
+
+The main table - including data that is not vertically replicated in the original csv file
+
+1.  site (name, year. longitude, latitude, area_hectares)
+
+4 tables including dtat that is vertically replicated
+
+2.  category
+3.  state
+4.  region
+5.  ISO
+
+### a. Creating a data model diagram
+
+The diagram is created with drawSQL tool
+
+![](images/clipboard-365220163.png)
+
+### b. Creating tables
+
+```{sql connection=con}
+
+CREATE TABLE category (
+id SERIAL,
+name VARCHAR(64) UNIQUE NOT NULL,
+PRIMARY KEY(id)
+);
+```
+
+```{sql connection=con}
+
+CREATE TABLE state(
+id SERIAL,
+name VARCHAR(64) UNIQUE NOT NULL,
+PRIMARY KEY(id)
+);
+```
+
+```{sql connection=con}
+
+
+CREATE TABLE region (
+id SERIAL,
+name VARCHAR(64) UNIQUE NOT NULL,
+PRIMARY KEY(id)
+);
+```
+
+```{sql connection=con}
+
+CREATE TABLE ISO (
+id SERIAL,
+code CHAR(4) UNIQUE,
+PRIMARY KEY(id)
+);
+
+```
+
+```{sql connection=con}
+
+CREATE TABLE site ( 
+id SERIAL, 
+name VARCHAR(256) UNIQUE NOT NULL, 
+year NUMERIC,
+longtitude NUMERIc,
+latitude NUMERIC,
+area_hectares NUMERIC,
+category_id INTEGER REFERENCES category(id) ON DELETE CASCADE,
+state_id INTEGER REFERENCES state(id) ON DELETE CASCADE,
+region_id INTEGER REFERENCES region(id) ON DELETE CASCADE,
+ISO_id INTEGER REFERENCES ISO(id) ON DELETE CASCADE,
+PRIMARY KEY(id)
+);
+```
+
+```{sql connection=con}
+
+SELECT * FROM site;
+
+```
+
+Here are table details (accessed with \d+ command from psql shell):
+
+![](images/clipboard-1082545571.png)
+
+We also create a working table - a temporary "container" for all data imported from the csv file (raw_unesco). This table will be used for further operations in SQL and then discarded.
+
+```{sql connection=con}
+
+CREATE TABLE raw_unesco ( 
+name VARCHAR(1024)UNIQUE NOT NULL, 
+year INTEGER,
+longtitude NUMERIC,
+latitude NUMERIC,
+area_hectares NUMERIC,
+category VARCHAR(64),
+states VARCHAR (128),
+region VARCHAR (128),
+ISO char(4),
+category_id INTEGER,
+state_id INTEGER,
+region_id INTEGER,
+ISO_id INTEGER
+);
+```
+
+ 
+
+### c. Importing data into tables
+
+The order of columns in the destination table (site) has to be the same as in the source table (csv file).
+
+```{sql connection=con}
+
+COPY raw_unesco(name, year, longtitude, latitude, area_hectares, category, states, region, ISO) 
+FROM  'D:\Datasets\whc-sites-2018-reduced.csv' 
+WITH DELIMITER ',' CSV HEADER;
+
+```
+
+```{sql connection=con}
+
+INSERT INTO category (name) 
+SELECT DISTINCT category FROM raw_unesco;
+
+```
+
+```{sql connection=con}
+
+SELECT * FROM category;
+
+```
+
+```{sql connection=con}
+
+
+INSERT INTO state (name) 
+SELECT DISTINCT states FROM raw_unesco;
+
+```
+
+```{sql connection=con}
+
+SELECT * FROM state;
+
+```
+
+```{sql connection=con}
+
+INSERT INTO region (name) 
+SELECT DISTINCT region FROM raw_unesco;
+```
+
+```{sql connection=con}
+
+SELECT * FROM region;
+
+```
+
+```{sql connection=con}
+
+INSERT INTO ISO (code) 
+SELECT DISTINCT ISO
+FROM raw_unesco;
+```
+
+```{sql connection=con}
+Select * FROM ISO;
+
+```
+
+Next, we update the "raw_unesco" table adding category_id, state_id, region_id, and ISO:\_id column. The values in these columns will be taken from newly created tables (category, state, region, ISO) ,
+
+```{sql connection=con}
+
+UPDATE raw_unesco  
+SET category_id = (SELECT category.id FROM category WHERE category.name = raw_unesco.category); 
+```
+
+```{sql connection=con}
+
+UPDATE raw_unesco  
+SET region_id = (SELECT region.id FROM region WHERE region.name = raw_unesco.region); 
+
+```
+
+```{sql connection=con}
+
+UPDATE raw_unesco  
+SET state_id = (SELECT state.id FROM state WHERE state.name = raw_unesco.states); 
+
+```
+
+```{sql connection=con}
+
+UPDATE raw_unesco  
+SET ISO_id = (SELECT ISO.id FROM ISO WHERE ISO.code = raw_unesco.ISO); 
+
+```
+
+As we can see the columns in the "raw_unesco" have been updated.
+
+```{sql connection=con}
+
+SELECT name, category_id, state_id, region_id, iso_id
+FROM raw_unesco
+WHERE states = 'Sweden';
+
+```
+
+![](images/clipboard-1332089352.png)
+
+In the next step I copy the values from categoryt_id, state_id, region_id, and ISO_id column in the "raw_unesco" table into the "site" table - the ultimate destination table.
+
+```{sql connection=con}
+
+INSERT INTO site (
+name, 
+year, 
+longtitude, 
+latitude, 
+area_hectares, 
+category_id, 
+state_id, 
+region_id, 
+ISO_id)  
+SELECT 
+name, 
+year, 
+longtitude, 
+latitude, 
+area_hectares, 
+category_id, 
+state_id, 
+region_id, 
+ISO_id  
+FROM raw_unesco;
+```
+
+```{sql connection=con}
+
+SELECT * FROM site
+WHERE name LIKE 'A%'
+LIMIT 10;
+
+```
+
+![](images/clipboard-240080624.png)
+
+We can now discard the temporary table "raw_unesco"
+
+```{sql connection=con}
+
+DROP TABLE raw_unesco;
+```
+
+ 
+
+### d. Joining tables
+
+We can join tables to display the combined data
+
+```{sql connection=con}
+
+SELECT site.name, site.year, category.name AS category, state.name AS state, region.name AS region, ISO.code AS ISO
+FROM site
+JOIN category ON category.id = site.category_id
+JOIN state ON state.id = site.state_id
+JOIN region ON region.id = site.region_id
+JOIN ISO ON ISO.id = site.iso_id
+LIMIT 10
+;
+
+```
+
+![](images/clipboard-2135803069.png)
