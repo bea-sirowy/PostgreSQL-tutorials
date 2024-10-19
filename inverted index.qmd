@@ -1,0 +1,277 @@
+---
+title: "Building an inverted string index (a SQL demo)"
+author: "Beata Sirowy"
+format: html
+editor: visual
+---
+
+The document begins with an overview of index types in PostgreSQL and their use cases.
+
+Then, I built an inverted index on a document—first by hand and then using PostgreSQL's built-in features.
+
+The document is created in Quarto accessed from RStudio, connected to a locally hosted PostgreSQL database.
+
+## 1. Loading libraries
+
+```{r}
+
+library(tidyverse)        
+library(DBI)        
+library(RPostgres)        
+library(dbplyr)
+```
+
+## 2. Establishing a database connection (PostgreSQL)
+
+I use RPostgres package to connent to a locally hosted PostgreSQL database.
+
+```{r}
+
+con <- DBI::dbConnect(                        
+  RPostgres::Postgres(),                        
+  dbname = 'postgres',                        
+  host = 'localhost',                        
+  port = 5432,                        
+  user = 'postgres',                        
+  password = 'abcd'        
+  )
+```
+
+## 3. PostgreSQL index types
+
+Getting the right type of index is crucial for database performance.
+
+-   **B-Tree** - The default for many applications - automatically balanced as it grows
+
+    ![Image source: Wikipedia.org](images/clipboard-1009650478.png)
+
+-   **BRIN** - Block Range Index - Smaller / faster if data is mostly sorted; often used in data mining applications
+
+    ![Image source: Wikipedia.org](images/clipboard-3394508813.png)
+
+-   **Hash** - Quick lookup of long key strings - no prefix lookup, only direct matches
+
+    ![Image source: Wikipedia.org](images/clipboard-2786503126.png)
+
+-   **GIN - Generalized Inverted Indexes** - multiple values in a column, usually preferred type
+
+-   **GiST - Generalized Search Tree -** uses a hashing function; due to it the index is *lossy*, i.e. it might produce false matches when two words hash to the same bit position.
+
+-   **SP-GiST - Space Partitioned Generalized Search Tree -** used with GIS data
+
+### Forward and Inverted Indexes
+
+in general, there are two categories of indexes:
+
+-   **Forward indexes** - we give the index a logical key and it tells us where to find the row that contains the key. (**B-Tree, BRIN, Hash**)
+
+-   **Inverted indexes** - we give the index a string (query) and the index gives us a list of *all* the rows that match the query. (**GIN, GiST**), works a bit like a wildcard
+
+    ![Image source: https://www.pg4e.com/lectures/05-FullText-images/inverted-index.png](images/clipboard-4253664967.png){width="506"}
+
+The division is not always strict - B-tree indexes are stored in sorted order (forward indexes), but we give a B-Tree the prefix of a logical key, it can give us a set of rows (like an inverted index).
+
+A typical use case for an **inverse index**: to quickly search text documents
+
+-   inverted indexes are generally used for : e.g. blog posts, websites
+
+-   similar to Google Search
+
+    -   Crawl: Retrieve documents, parse them and create an **inverted index**
+
+    -   Search: Take keywords, find the documents with the words then rank them and present results
+
+**References:**
+
+-   Severance, Ch. (2019) PostgreSQL Lecture Notes. Available: <https://www.pg4e.com/lectures/05-FullText>
+
+## 4. Building an inverted index (GIN) 'by hand' - using only SQL
+
+PostgreSQL has an inbuilt index function that can create indexes automatically. Here I create an inverted index "by hand", using SQL commands, to explore the mechanics of this type of index.
+
+-   We can split long text columns into space-delimited words using PostgreSQL's split-like function **string_to_array()**.
+
+-   then we can use the PostgresSQL **unnest()** function to turn the resulting array into separate rows - this is somehow similar to generate_series() function
+
+    ![](images/clipboard-1918721310.png)
+
+     
+
+    ### Creating a table to be used further in the demo
+
+    ```{sql connection=con}
+
+    CREATE TABLE docs (id SERIAL, doc TEXT, PRIMARY KEY(id));
+
+    ```
+
+    ```{sql connection=con}
+
+    INSERT INTO docs (doc) VALUES
+    ('This is SQL and Python and other fun teaching stuff'),
+    ('More people should learn SQL from Prof_Chuck'),
+    ('Prof_Chuck also teaches Python and also SQL');
+
+    ```
+
+    SELECT
+
+    ```{sql connection=con}
+
+    SELECT * FROM  docs; 
+
+    ```
+
+    ### Break the document column into one row per word + primary key
+
+    ```{sql connection=con}
+
+    SELECT id, s.keyword AS keyword
+    FROM docs AS D, 
+    unnest(string_to_array(D.doc, ' ')) s(keyword)
+    ORDER BY id;
+
+    ```
+
+    ### Discard duplicate rows
+
+    ```{sql connection=con}
+
+    SELECT DISTINCT id, s.keyword AS keyword
+    FROM docs AS D, unnest(string_to_array(D.doc, ' ')) s(keyword)
+    ORDER BY id;
+
+
+    ```
+
+    ### Create the keyword table
+
+    ```{sql connection=con}
+
+    CREATE TABLE docs_gin (
+      keyword TEXT,
+      doc_id INTEGER REFERENCES docs(id) ON DELETE CASCADE
+    );
+
+    ```
+
+    ### Insert the keyword / primary key rows into a table
+
+    ```{sql connection=con}
+
+    INSERT INTO docs_gin (doc_id, keyword)
+    SELECT DISTINCT id, s.keyword AS keyword
+    FROM docs AS D, unnest(string_to_array(D.doc, ' ')) s(keyword)
+    ORDER BY id;
+    ```
+
+    ```{sql connection=con}
+
+    SELECT * FROM docs_gin ORDER BY doc_id;
+    ```
+
+    ### Find all the distinct documents that match a keyword
+
+    ```{sql connection=con}
+
+    SELECT DISTINCT keyword, doc_id FROM docs_gin AS G
+    WHERE G.keyword = 'SQL';
+    ```
+
+    ### Find all the distinct documents that match a keyword
+
+    ```{sql connection=con}
+
+    SELECT DISTINCT id, doc FROM docs AS D
+    JOIN docs_gin AS G ON D.id = G.doc_id
+    WHERE G.keyword = 'Python';
+
+    ```
+
+    ### Remove duplicates and have more than one keyword
+
+    ```{sql connection=con}
+
+    SELECT DISTINCT doc FROM docs AS D
+    JOIN docs_gin AS G ON D.id = G.doc_id
+    WHERE G.keyword IN ('fun', 'people');
+
+    ```
+
+    ### Find a phrase including any of the keywords
+
+    ```{sql connection=con}
+
+    SELECT DISTINCT doc FROM docs AS D
+    JOIN docs_gin AS G ON D.id = G.doc_id
+    WHERE G.keyword = ANY(string_to_array('I want to learn', ' '));
+
+    ```
+
+    ```         
+    ```
+
+## 5. Creating an inverted index (GIN) with PostgreSQL in-built features
+
+The basic syntax of the command:
+
+`CREATE INDEX name ON table USING GIN ([operator class]column);`
+
+```{sql connection=con}
+
+CREATE INDEX GIN_docs ON docs USING gin(string_to_array(doc, ' ') array_ops);
+```
+
+\
+
+The \<\@ is looking for an intersection between two arrays (a set theory concept of intersection - like in inner join)
+
+```{sql connection=con}
+
+SELECT id, doc FROM docs 
+WHERE '{learn}' <@ string_to_array(doc, ' ');
+
+```
+
+```{sql connection=con}
+
+EXPLAIN ANALYZE
+SELECT id, doc FROM docs 
+WHERE '{learn}' <@ string_to_array(doc, ' ');
+
+```
+
+\
+
+As we can see, the type of index scan performed was a sequential scan - not using our GIN index. This is due to the small size of the table. I will extend it with some randomly generated rows and try again.
+
+```{sql connection=con}
+
+INSERT INTO docs (doc) 
+SELECT 'Pink_Panther ' || generate_series(1000,2000);
+
+```
+
+```{sql connection=con}
+
+SELECT * FROM docs
+LIMIT 20;
+
+```
+
+\
+
+We perform the search again and check the type.
+
+```{sql connection=con}
+
+
+EXPLAIN ANALYZE
+SELECT id, doc FROM docs 
+WHERE '{learn}' <@ string_to_array(doc, ' ');
+
+```
+
+\
+
+As we can see, GIN index was used in this case (a bitmap heap scan was performed - not a sequential scan as in the previous case) .
