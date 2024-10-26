@@ -1,6 +1,6 @@
 Repository Overview
 
-This repository contains examples of PostgreSQL queries, operations, data normalization, and indexing. It also includes detailed notes from the "PostgreSQL for Everybody" specialization, a series of courses led by Prof. Charles Severance from the University of Michigan.
+This repository contains examples of PostgreSQL queries, operations, data normalization, and indexing. It also includes notes from the "PostgreSQL for Everybody" specialization, a series of courses led by Prof. Charles Severance from the University of Michigan.
 Key Features
 
     Examples of PostgreSQL queries and operations
